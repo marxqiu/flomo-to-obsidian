@@ -11,8 +11,6 @@ import { generateMoments } from '../obIntegration/moments';
 import { generateCanvas } from '../obIntegration/canvas';
 
 import { FLOMO_CACHE_LOC } from './const'
-//const FLOMO_CACHE_LOC = path.join(os.homedir(), "/.flomo/cache/");
-
 
 export class FlomoImporter {
     private config: Record<string, any>;
@@ -73,53 +71,110 @@ export class FlomoImporter {
     }
 
     async import(): Promise<FlomoCore> {
+        // Validate input file exists
+        if (!this.config["rawDir"]) {
+            throw new Error("No input file specified");
+        }
+
+        // Check if the file exists
+        const fileExists = await fs.pathExists(this.config["rawDir"]);
+        if (!fileExists) {
+            throw new Error(`Input file does not exist: ${this.config["rawDir"]}`);
+        }
+
+        // Check if it's a valid zip file by checking extension
+        if (!this.config["rawDir"].toLowerCase().endsWith('.zip')) {
+            throw new Error("Input file must be a ZIP file");
+        }
 
         // 1. Create workspace
-        const tmpDir = path.join(FLOMO_CACHE_LOC, "data")
+        const tmpDir = path.join(FLOMO_CACHE_LOC, "data");
         await fs.mkdirp(tmpDir);
 
         // 2. Unzip flomo_backup.zip to workspace
-        const files = await decompress(this.config["rawDir"], tmpDir)
+        let files;
+        try {
+            console.debug(`DEBUG: Decompressing ${this.config["rawDir"]} to ${tmpDir}`);
+            files = await decompress(this.config["rawDir"], tmpDir);
+            
+            if (!files || files.length === 0) {
+                throw new Error("No files found in the archive");
+            }
+            
+            console.debug(`DEBUG: Extracted ${files.length} files`);
+        } catch (error) {
+            console.error(`DEBUG: Decompression failed:`, error);
+            throw new Error(`Failed to extract ZIP file: ${error.message}`);
+        }
 
-        // 3. copy attachments to ObVault
-        const obVaultConfig = await fs.readJson(`${this.config["baseDir"]}/${this.app.vault.configDir}/app.json`)
-        const attachementDir = obVaultConfig["attachmentFolderPath"] + "/flomo/";
+        try {
+            // 3. copy attachments to ObVault
+            const obVaultConfig = await fs.readJson(`${this.config["baseDir"]}/${this.app.vault.configDir}/app.json`)
+            const attachementDir = obVaultConfig["attachmentFolderPath"] + "/flomo/";
 
-        for (const f of files) {
-            if (f.type == "directory" && f.path.endsWith("/file/")) {
-                console.debug(`DEBUG: copying from ${tmpDir}/${f.path} to ${this.config["baseDir"]}/${attachementDir}`)
-                await fs.copy(`${tmpDir}/${f.path}`, `${this.config["baseDir"]}/${attachementDir}`);
-                break
+            for (const f of files) {
+                if (f.type == "directory" && f.path.endsWith("/file/")) {
+                    console.debug(`DEBUG: copying from ${tmpDir}/${f.path} to ${this.config["baseDir"]}/${attachementDir}`)
+                    await fs.copy(`${tmpDir}/${f.path}`, `${this.config["baseDir"]}/${attachementDir}`);
+                    break
+                }
             }
 
+            // 4. Import Memos
+            // Find the HTML file - look for any .html file in the extracted files
+            const htmlFiles = files.filter(f => f.path.endsWith('.html') && f.type === 'file');
+            
+            if (htmlFiles.length === 0) {
+                throw new Error("No HTML file found in the archive");
+            }
+
+            // Use the first HTML file found, or find the main one
+            let defaultPage = htmlFiles[0].path;
+            
+            // If there are multiple HTML files, prefer index.html or a file that looks like a user ID
+            const preferredFile = htmlFiles.find(f => 
+                f.path === 'index.html' || 
+                /^\d+\.html$/.test(path.basename(f.path))
+            );
+            
+            if (preferredFile) {
+                defaultPage = preferredFile.path;
+            }
+
+            console.debug(`DEBUG: Using HTML file: ${defaultPage}`);
+            
+            const htmlFilePath = path.join(tmpDir, defaultPage);
+            
+            // Verify the HTML file exists
+            if (!(await fs.pathExists(htmlFilePath))) {
+                throw new Error(`HTML file not found: ${htmlFilePath}`);
+            }
+
+            const dataExport = await this.sanitize(htmlFilePath);
+            const flomo = new FlomoCore(dataExport);
+
+            const memos = await this.importMemos(flomo);
+
+            // 5. Ob Intergations
+            // If Generate Moments
+            if (this.config["optionsMoments"] != "skip") {
+                await generateMoments(this.app, memos, this.config);
+            }
+
+            // If Generate Canvas
+            if (this.config["optionsCanvas"] != "skip") {
+                await generateCanvas(this.app, memos, this.config);
+            }
+
+            // 6. Cleanup Workspace
+            await fs.remove(tmpDir);
+
+            return flomo;
+            
+        } catch (error) {
+            // Cleanup on error
+            await fs.remove(tmpDir).catch(() => {});
+            throw error;
         }
-
-        // 4. Import Memos
-        // @Mar-31, 2024 Fix: #21 - Update default page from index.html to <userid>.html
-        const defaultPage = (await fs.readdir(`${tmpDir}/${files[0].path}`)).filter((fn, _idx, fn_array) => fn.endsWith('.html'))[0];
-        const dataExport = await this.sanitize(`${tmpDir}/${files[0].path}/${defaultPage}`);
-        const flomo = new FlomoCore(dataExport);
-
-        const memos = await this.importMemos(flomo);
-
-        // 5. Ob Intergations
-        // If Generate Moments
-        if (this.config["optionsMoments"] != "skip") {
-            await generateMoments(app, memos, this.config);
-        }
-
-
-        // If Generate Canvas
-        if (this.config["optionsCanvas"] != "skip") {
-            await generateCanvas(app, memos, this.config);
-        }
-
-
-        // 6. Cleanup Workspace
-        await fs.remove(tmpDir);
-
-        return flomo
-
     }
-
 }

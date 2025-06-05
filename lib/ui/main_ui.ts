@@ -15,11 +15,13 @@ export class MainUI extends Modal {
 
     plugin: Plugin;
     rawPath: string;
+    selectedFile: File | null;
 
     constructor(app: App, plugin: Plugin) {
         super(app);
         this.plugin = plugin;
         this.rawPath = "";
+        this.selectedFile = null;
     }
 
     async onSync(btn: ButtonComponent): Promise<void> {
@@ -33,6 +35,7 @@ export class MainUI extends Modal {
                 btn.setDisabled(false);
                 if (exportResult[0] == true) {
                     this.rawPath = DOWNLOAD_FILE;
+                    this.selectedFile = null; // Clear selected file for auto sync
                     btn.setButtonText("Importing...");
                     await this.onSubmit();
                     btn.setButtonText("Auto Sync 🤗");
@@ -52,6 +55,36 @@ export class MainUI extends Modal {
     }
 
     async onSubmit(): Promise<void> {
+        console.debug(`DEBUG: rawPath = "${this.rawPath}"`);
+        console.debug(`DEBUG: selectedFile = `, this.selectedFile);
+        
+        // For manual file selection, handle the File object
+        if (this.selectedFile && !this.rawPath) {
+            try {
+                // Create temporary file from the selected File object
+                const tempDir = path.join(os.tmpdir(), 'flomo-import');
+                await fs.mkdirp(tempDir);
+                const tempFilePath = path.join(tempDir, this.selectedFile.name);
+                
+                // Convert File to Buffer and save temporarily
+                const arrayBuffer = await this.selectedFile.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                await fs.writeFile(tempFilePath, buffer);
+                
+                this.rawPath = tempFilePath;
+                console.debug(`DEBUG: Created temporary file at: ${this.rawPath}`);
+            } catch (err) {
+                console.error('Failed to create temporary file:', err);
+                new Notice(`Failed to process selected file: ${err.message}`);
+                return;
+            }
+        }
+        
+        if (!this.rawPath || this.rawPath.trim() === "") {
+            new Notice("Please select a file first.");
+            return;
+        }
+
         const targetMemoLocation = this.plugin.settings.flomoTarget + "/" +
             this.plugin.settings.memoTarget;
 
@@ -65,18 +98,40 @@ export class MainUI extends Modal {
             const config = this.plugin.settings;
             config["rawDir"] = this.rawPath;
 
+            console.debug(`DEBUG: Starting import with config:`, config);
+
             const flomo = await (new FlomoImporter(this.app, config)).import();
 
             new Notice(`🎉 Import Completed.\nTotal: ${flomo.memos.length} memos`)
+            
+            // Clean up temporary file if we created one
+            if (this.selectedFile && this.rawPath.includes(os.tmpdir())) {
+                try {
+                    await fs.remove(this.rawPath);
+                    console.debug(`DEBUG: Cleaned up temporary file: ${this.rawPath}`);
+                } catch (cleanupErr) {
+                    console.warn('Failed to clean up temporary file:', cleanupErr);
+                }
+            }
+            
             this.rawPath = "";
-
+            this.selectedFile = null;
 
         } catch (err) {
+            // Clean up temporary file on error
+            if (this.selectedFile && this.rawPath.includes(os.tmpdir())) {
+                try {
+                    await fs.remove(this.rawPath);
+                } catch (cleanupErr) {
+                    console.warn('Failed to clean up temporary file on error:', cleanupErr);
+                }
+            }
+            
             this.rawPath = "";
+            this.selectedFile = null;
             console.log(err);
             new Notice(`Flomo Importer Error. Details:\n${err}`);
         }
-
     }
 
     onOpen() {
@@ -87,9 +142,22 @@ export class MainUI extends Modal {
 
         const fileLocContol: HTMLInputElement = contentEl.createEl("input", { type: "file", cls: "uploadbox" })
         fileLocContol.setAttr("accept", ".zip");
-        fileLocContol.onchange = (ev) => {
-            this.rawPath = ev.currentTarget.files[0]["path"];
-            console.log(this.rawPath)
+        
+        // Improved file handling for Obsidian environment
+        fileLocContol.onchange = (ev: Event) => {
+            const target = ev.target as HTMLInputElement;
+            if (target.files && target.files.length > 0) {
+                const file = target.files[0];
+                this.selectedFile = file;
+                this.rawPath = ""; // Clear rawPath since we'll handle it in onSubmit
+                
+                console.debug(`DEBUG: File selected: ${file.name} (${file.size} bytes)`);
+                new Notice(`File selected: ${file.name}`);
+            } else {
+                this.selectedFile = null;
+                this.rawPath = "";
+                console.debug(`DEBUG: No file selected`);
+            }
         };
 
         contentEl.createEl("br");
@@ -189,15 +257,12 @@ export class MainUI extends Modal {
             this.plugin.settings.expOptionAllowbilink = ev.currentTarget.checked;
         };
 
-
         const mergeByDate = createExpOpt(contentEl, "Merge memos by date")
 
         mergeByDate.checked = this.plugin.settings.mergeByDate;
         mergeByDate.onchange = (ev) => {
             this.plugin.settings.mergeByDate = ev.currentTarget.checked;
         };
-
-
 
         new Setting(contentEl)
             .addButton((btn) => {
@@ -212,11 +277,9 @@ export class MainUI extends Modal {
                 btn.setButtonText("Import")
                     .setCta()
                     .onClick(async () => {
-                        if (this.rawPath != "") {
+                        if (this.selectedFile || this.rawPath != "") {
                             await this.plugin.saveSettings();
                             await this.onSubmit();
-                            //const manualSyncUI: Modal = new ManualSyncUI(this.app, this.plugin);
-                            //manualSyncUI.open();
                             this.close();
                         }
                         else {
@@ -238,7 +301,8 @@ export class MainUI extends Modal {
 
     onClose() {
         this.rawPath = "";
+        this.selectedFile = null;
         const { contentEl } = this;
         contentEl.empty();
     }
-} 
+}
