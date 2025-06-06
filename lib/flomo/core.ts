@@ -57,7 +57,8 @@ export class FlomoCore {
               
             td.addRule('listItem', liRule);
 
-            return td.turndown(content).replace(/\\\[/g, '[')
+            return td.turndown(content).replace(/\\_/g, '_')
+                                       .replace(/\\\[/g, '[')
                                        .replace(/\\\]/g, ']')
                                         //replace(/\\#/g, '#')
                                        .replace(/!\[\]\(file\//gi, "\n![](flomo/")
